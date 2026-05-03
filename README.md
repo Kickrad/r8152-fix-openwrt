@@ -1,4 +1,4 @@
-# r8152-fix
+# tp-link-ue300-r8152-fix
 
 **Fix for Realtek RTL8152/RTL8153 USB Ethernet "Tx status -71" crashes on Linux**
 
@@ -9,14 +9,14 @@ These adapters (TP-Link UE300, Anker, Cable Matters, D-Link, and many others) ha
 ## Quick Fix
 
 ```bash
-sudo bash -c "$(curl -s https://raw.githubusercontent.com/OpenRoyleAl/r8152-fix/main/fix-r8152.sh)"
+sudo bash -c "$(curl -s https://raw.githubusercontent.com/OpenRoyleAl/tp-link-ue300-tp-link-ue300-r8152-fix/main/fix-r8152.sh)"
 ```
 
 Or download and run:
 
 ```bash
-git clone https://github.com/OpenRoyleAl/r8152-fix.git
-cd r8152-fix
+git clone https://github.com/OpenRoyleAl/tp-link-ue300-tp-link-ue300-r8152-fix.git
+cd tp-link-ue300-r8152-fix
 sudo bash fix-r8152.sh
 ```
 
@@ -137,18 +137,18 @@ If neither works, the watchdog logs a failure message. The adapter chip may be f
 ## File layout
 
 ```
-/opt/r8152-fix/           # Installation directory (or wherever you cloned)
+/opt/tp-link-ue300-r8152-fix/           # Installation directory (or wherever you cloned)
 ├── fix-r8152.sh          # Main installer/uninstaller/status
 ├── r8152-watchdog.sh     # Auto-recovery watchdog (runs via cron every 2min)
 ├── README.md             # This file
 └── LICENSE               # MIT
 
 /etc/udev/rules.d/
-├── 99-r8152-fix.rules    # USB power settings on hotplug
+├── 99-tp-link-ue300-r8152-fix.rules    # USB power settings on hotplug
 └── 99-r8152-trigger.rules # Triggers systemd service on interface add
 
 /etc/systemd/system/
-└── r8152-fix.service     # Applies fixes on boot
+└── tp-link-ue300-r8152-fix.service     # Applies fixes on boot
 ```
 
 ## Contributing
