@@ -145,7 +145,7 @@ check_interface() {
             return 0
         fi
 
-        # Step 1: Try driver unbind/bind (safe, only affects this driver)
+        # Step 1: Try hub port power cycle (safe, only affects this driver)
         local usb_dev
         usb_dev=$(get_usb_dev "$iface") || true
         if [ -n "$usb_dev" ] && [ -d "/sys/bus/usb/devices/${usb_dev}" ]; then
