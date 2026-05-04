@@ -62,7 +62,10 @@ reapply_fixes() {
     ethtool -K "$iface" tso off 2>/dev/null || true
     ethtool -K "$iface" gso off 2>/dev/null || true
     ethtool -K "$iface" gro off 2>/dev/null || true
-    ethtool -K "$iface" sg off 2>/dev/null || true
+    ethtool -K "$iface" sg off
+    ethtool -K "$iface" rx-vlan-offload off
+    ethtool -K "$iface" tx-vlan-offload off
+    ethtool -K "$iface" rx-checksum off
     ethtool --set-eee "$iface" eee off 2>/dev/null || true
     local usb_dev
     usb_dev=$(get_usb_dev "$iface") || true
@@ -128,12 +131,12 @@ check_interface() {
 
     # Check for recent Tx errors - count them
     local errors
-    errors=$(journalctl -k --since "3 minutes ago" 2>/dev/null | grep -c "r8152.*Tx status -71\|r8152.*Stop submitting" 2>/dev/null)
+    errors=$(journalctl -k --since "2 minutes ago" 2>/dev/null | grep -c "r8152.*Tx status -71\|r8152.*Stop submitting" 2>/dev/null)
     case "$errors" in
         ''|*[!0-9]*) errors=0 ;;
     esac
 
-    if [ "$errors" -gt 10 ] 2>/dev/null; then
+    if [ "$errors" -gt 5 ] 2>/dev/null; then
         log "CRITICAL: ${errors} Tx errors detected on ${iface} in last 3 minutes"
 
         # Prevent infinite restart loops

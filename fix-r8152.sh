@@ -139,7 +139,7 @@ apply_fixes() {
     fi
     
     # 2. Disable TCP offloads (main fix for Tx status -71)
-    for offload in tso gso gro sg; do
+    for offload in tso gso gro sg rx-vlan-offload tx-vlan-offload rx-checksum; do
         if ethtool -K "${iface}" "${offload}" off 2>/dev/null; then
             log "  ✓ ${offload}: disabled"
             applied=1
@@ -151,7 +151,7 @@ apply_fixes() {
         log "  ✓ EEE: disabled"
     fi
     
-    # 4. Checksum offloads are kept enabled (not a known trigger for Tx -71)
+    # 4. Checksum offloads are disabled (may help with Tx -71)
     
     log "Fixes applied to ${iface}"
     return 0
@@ -175,7 +175,7 @@ check_fixes() {
     fi
     
     # Check offloads
-    for offload in tcp-segmentation-offload generic-segmentation-offload generic-receive-offload scatter-gather; do
+    for offload in tcp-segmentation-offload generic-segmentation-offload generic-receive-offload scatter-gather rx-vlan-offload tx-vlan-offload rx-checksum-offload; do
         local state
         state=$(ethtool -k "${iface}" 2>/dev/null | grep "${offload}:" | awk '{print $2}')
         echo "  ${offload}: ${state:-unknown}"
