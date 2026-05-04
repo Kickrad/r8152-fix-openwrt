@@ -40,6 +40,8 @@ CRON_CMD="${SCRIPT_DIR}/r8152-watchdog.sh"
 VENDOR_ID="2357"        # TP-Link
 PRODUCT_ID="0601"       # UE300
 DRIVER_NAME="r8152"
+# Detect real user when run via sudo
+REAL_USER="${SUDO_USER:-$(whoami)}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -139,7 +141,7 @@ apply_fixes() {
     fi
     
     # 2. Disable TCP offloads (main fix for Tx status -71)
-    for offload in tso gso gro sg rx-vlan-offload tx-vlan-offload rx-checksum; do
+    for offload in tso gso gro sg rx-vlan-offload tx-vlan-offload rx-checksum tx-checksum-ipv4 tx-checksum-ipv6; do
         if ethtool -K "${iface}" "${offload}" off 2>/dev/null; then
             log "  ✓ ${offload}: disabled"
             applied=1
@@ -151,7 +153,8 @@ apply_fixes() {
         log "  ✓ EEE: disabled"
     fi
     
-    # 4. Checksum offloads are disabled (may help with Tx -71)
+    # 4. Install kernel USB quirk to force USB 2.0 on next boot (prevents RTL8153 USB 3.0 bug)
+    install_usb_quirk
     
     log "Fixes applied to ${iface}"
     return 0
@@ -175,12 +178,17 @@ check_fixes() {
     fi
     
     # Check offloads
-    for offload in tcp-segmentation-offload generic-segmentation-offload generic-receive-offload scatter-gather rx-vlan-offload tx-vlan-offload rx-checksum-offload; do
+    for offload in tcp-segmentation-offload generic-segmentation-offload generic-receive-offload scatter-gather rx-vlan-offload tx-vlan-offload tx-checksum-ipv4 tx-checksum-ipv6; do
         local state
         state=$(ethtool -k "${iface}" 2>/dev/null | grep "${offload}:" | awk '{print $2}')
         echo "  ${offload}: ${state:-unknown}"
         [ "$state" = "on" ] && issues=1
     done
+    # rx-checksumming has different naming in ethtool output
+    local rx_csum
+    rx_csum=$(ethtool -k "${iface}" 2>/dev/null | grep "rx-checksumming:" | awk '{print $2}')
+    echo "  rx-checksumming: ${rx_csum:-unknown}"
+    [ "$rx_csum" = "on" ] && issues=1
     
     # Check EEE
     local eee_state
@@ -189,7 +197,8 @@ check_fixes() {
     
     # Check recent errors
     local errors
-    errors=$(journalctl -k --since "1 hour ago" 2>/dev/null | grep -c "r8152.*Tx status\|r8152.*Stop submitting" || echo 0)
+    errors=$(journalctl -k --since "1 hour ago" 2>/dev/null | grep -c "r8152.*Tx status\|r8152.*Stop submitting\|r8152.*timed out" 2>/dev/null || true)
+    errors=${errors:-0}
     if [ "$errors" -gt 0 ]; then
         echo -e "  ${RED}Recent Tx errors: ${errors}${NC}"
         issues=1
@@ -198,6 +207,43 @@ check_fixes() {
     fi
     
     return $issues
+}
+
+# Add usbcore.quirks to force USB 2.0 mode (RTL8153 USB 3.0 is buggy)
+install_usb_quirk() {
+    local quirk="2357:0601:b"
+    local grub_file="/etc/default/grub"
+    
+    # Try via sysfs first (runtime, only affects next re-enumeration)
+    if [ -w "/sys/module/usbcore/parameters/quirks" ]; then
+        local current
+        current=$(cat /sys/module/usbcore/parameters/quirks 2>/dev/null)
+        if echo "$current" | grep -q "2357:0601"; then
+            log "  ✓ USB 2.0 quirk already set via sysfs"
+        else
+            local new_quirks="${current:+${current},}${quirk}"
+            echo "$new_quirks" > /sys/module/usbcore/parameters/quirks 2>/dev/null && log "  ✓ USB 2.0 quirk set at runtime" || warn "  Could not set USB 2.0 quirk via sysfs"
+        fi
+    fi
+    
+    # Make it permanent via GRUB for next boot
+    if [ -f "$grub_file" ] && command -v update-grub >/dev/null 2>&1; then
+        local current_grub
+        current_grub=$(grep "GRUB_CMDLINE_LINUX_DEFAULT" "$grub_file" 2>/dev/null | head -1)
+        if echo "$current_grub" | grep -q "usbcore.quirks=.*2357:0601"; then
+            log "  ✓ USB 2.0 quirk already in GRUB"
+        else
+            # Check if usbcore.quirks already exists
+            if echo "$current_grub" | grep -q "usbcore.quirks="; then
+                # Append to existing quirk string
+                sed -i "s|usbcore.quirks=\([^\"]*\)|usbcore.quirks=\1,${quirk}|" "$grub_file"
+            else
+                # Add new quirk parameter inside the quotes
+                sed -i 's|GRUB_CMDLINE_LINUX_DEFAULT="\(.*\)"|GRUB_CMDLINE_LINUX_DEFAULT="\1 usbcore.quirks=2357:0601:b"|' "$grub_file"
+            fi
+        fi
+    fi
+    # Note: run "sudo update-grub" after to apply
 }
 
 # Install udev rule
@@ -212,7 +258,7 @@ ACTION=="add", SUBSYSTEM=="net", KERNEL=="enx*", ATTR{power/control}="on"
 EOF
     
     # Also add a systemd-triggering rule for the fix service
-    # This is more portable and doesn't block udev
+    # This is more portable and doesnt block udev
     cat > "/etc/udev/rules.d/99-r8152-trigger.rules" << 'EOF'
 # Trigger r8152-fix service when r8152 network interface appears
 ACTION=="add", SUBSYSTEM=="net", KERNEL=="enx*", TAG+="systemd", ENV{SYSTEMD_WANTS}="r8152-fix.service"
@@ -250,6 +296,11 @@ ExecStart=/bin/sh -c '\
         ethtool -K "$iface" gso off 2>/dev/null || true; \
         ethtool -K "$iface" gro off 2>/dev/null || true; \
         ethtool -K "$iface" sg off 2>/dev/null || true; \
+        ethtool -K "$iface" rx-vlan-offload off 2>/dev/null || true; \
+        ethtool -K "$iface" tx-vlan-offload off 2>/dev/null || true; \
+        ethtool -K "$iface" rx-checksum off 2>/dev/null || true; \
+        ethtool -K "$iface" tx-checksum-ipv4 off 2>/dev/null || true; \
+        ethtool -K "$iface" tx-checksum-ipv6 off 2>/dev/null || true; \
         ethtool --set-eee "$iface" eee off 2>/dev/null || true; \
         bus=$(ethtool -i "$iface" 2>/dev/null | grep "bus-info:" | awk "{print \$2}"); \
         usb_path="/sys/bus/usb/devices/*${bus#*-}"; \
@@ -286,6 +337,7 @@ create_watchdog() {
 #   3. Logs all events for debugging
 
 LOG_FILE="/tmp/r8152-watchdog.log"
+LOCK_FILE="/tmp/r8152-watchdog.lock"
 RESTART_MARKER="/tmp/r8152-watchdog-last-restart"
 DRIVER="r8152"
 
@@ -310,9 +362,9 @@ get_usb_dev() {
     bus=$(ethtool -i "$iface" 2>/dev/null | grep "bus-info:" | awk '{print $2}')
     [ -z "$bus" ] && return 1
     local usb_part="${bus#*-}"
-    for dev in /sys/bus/usb/devices/*"${usb_part}" 2>/dev/null; do
-        [ -d "$dev" ] && basename "$dev" && return 0
-    done
+    for dev in /sys/bus/usb/devices/*"${usb_part}"; do
+        [ -d "$dev" ] 2>/dev/null && basename "$dev" && return 0
+    done 2>/dev/null
     return 1
 }
 
@@ -338,6 +390,11 @@ reapply_fixes() {
     ethtool -K "$iface" gso off 2>/dev/null || true
     ethtool -K "$iface" gro off 2>/dev/null || true
     ethtool -K "$iface" sg off 2>/dev/null || true
+    ethtool -K "$iface" rx-vlan-offload off 2>/dev/null || true
+    ethtool -K "$iface" tx-vlan-offload off 2>/dev/null || true
+    ethtool -K "$iface" rx-checksum off 2>/dev/null || true
+    ethtool -K "$iface" tx-checksum-ipv4 off 2>/dev/null || true
+    ethtool -K "$iface" tx-checksum-ipv6 off 2>/dev/null || true
     ethtool --set-eee "$iface" eee off 2>/dev/null || true
     
     local usb_dev
@@ -382,16 +439,17 @@ check_interface() {
         return 0
     fi
     
-    # Check for recent Tx errors
+    # Check for recent Tx errors (also check if interface can actually transmit)
     local errors
-    errors=$(journalctl -k --since "3 minutes ago" 2>/dev/null | grep -c "r8152.*Tx status -71\|r8152.*Stop submitting" || echo 0)
+    errors=$(journalctl -k --since "2 minutes ago" 2>/dev/null | grep -c "r8152.*Tx status -71\|r8152.*Stop submitting\|r8152.*timed out" 2>/dev/null || true)
+    errors=${errors:-0}
     
-    if [ "$errors" -gt 10 ]; then
+    if [ "$errors" -gt 5 ]; then
         log "CRITICAL: ${errors} Tx errors detected on ${iface} in last 3 minutes"
         
         # Check if we recently restarted to avoid infinite loops
-        if [ -f "$RESTART_MARKER" ] && [ "$(($(date +%s) - $(stat -c %Y "$RESTART_MARKER")))" -lt 120 ]; then
-            log "  Skipping - last restart was less than 2 minutes ago"
+        if [ -f "$RESTART_MARKER" ] && [ "$(($(date +%s) - $(stat -c %Y "$RESTART_MARKER")))" -lt 60 ]; then
+            log "  Skipping - last restart was less than 1 minute ago"
             return 0
         fi
         
@@ -452,6 +510,13 @@ check_interface() {
 
 # --- Main --------------------------------------------------------------------
 
+# Prevent concurrent runs (cron may overlap)
+if [ -f "$LOCK_FILE" ] && [ "$(($(date +%s) - $(stat -c %Y "$LOCK_FILE")))" -lt 300 ]; then
+    exit 0
+fi
+touch "$LOCK_FILE"
+trap 'rm -f "$LOCK_FILE"' EXIT
+
 # Find all r8152 interfaces
 IFACES=$(find_r8152_ifaces)
 
@@ -478,10 +543,10 @@ install_cron() {
     log "Installing watchdog cron job..."
     
     local cron_cmd="sudo ${CRON_CMD} > /dev/null 2>&1"
-    local cron_line="*/2 * * * * ${cron_cmd}  # r8152-fix watchdog"
+    local cron_line="* * * * * ${cron_cmd}  # r8152-fix watchdog"
     
     # Remove any existing r8152-fix cron entries and add the new one
-    (crontab -l 2>/dev/null | grep -v "r8152-fix\|r8152-watchdog"; echo "$cron_line") | crontab - 2>/dev/null && log "  ✓ Cron job installed (every 2 minutes)" || warn "  Could not install cron job"
+    (crontab -u "${REAL_USER}" -l 2>/dev/null | grep -v "r8152-fix\|r8152-watchdog"; echo "$cron_line") | crontab -u "${REAL_USER}" - 2>/dev/null && log "  ✓ Cron job installed (every 1 minute)" || warn "  Could not install cron job"
 }
 
 # Remove all changes
@@ -489,7 +554,7 @@ remove_all() {
     log "Removing all r8152-fix changes..."
     
     # Remove cron job
-    crontab -l 2>/dev/null | grep -v "r8152-fix\|r8152-watchdog" | crontab - 2>/dev/null && log "  ✓ Cron job removed"
+    crontab -u "${REAL_USER}" -l 2>/dev/null | grep -v "r8152-fix\|r8152-watchdog" | crontab -u "${REAL_USER}" - 2>/dev/null && log "  ✓ Cron job removed"
     
     # Remove udev rules
     rm -f "$UDEV_RULE_FILE" "/etc/udev/rules.d/99-r8152-trigger.rules" 2>/dev/null
@@ -535,7 +600,7 @@ show_status() {
     echo -n "  Udev rule: "; [ -f "$UDEV_RULE_FILE" ] && echo "✓" || echo "✗"
     echo -n "  Systemd service: "; [ -f "$SERVICE_FILE" ] && echo "✓" || echo "✗"
     echo -n "  Watchdog script: "; [ -f "$WATCHDOG_SCRIPT" ] && echo "✓" || echo "✗"
-    echo -n "  Cron job: "; crontab -l 2>/dev/null | grep -q "r8152-watchdog" && echo "✓" || echo "✗"
+    echo -n "  Cron job: "; crontab -u "${REAL_USER}" -l 2>/dev/null | grep -q "r8152-watchdog" && echo "✓" || echo "✗"
     
     echo ""
     echo "=== Watchdog Log (last 20 lines) ==="
