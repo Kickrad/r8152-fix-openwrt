@@ -24,6 +24,7 @@
 #
 # Requirements: bash, ethtool, ping, awk
 # Works on: Any Linux distribution with kernel 3.x+
+# Tested on: Omarchy, Arch Linux, Ubuntu, Debian, Fedora, Raspberry Pi OS
 #
 # License: MIT - https://opensource.org/licenses/MIT
 # =============================================================================
@@ -48,6 +49,28 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
+
+# --- Dependency Check --------------------------------------------------------
+check_dependencies() {
+    local missing=()
+    command -v ethtool >/dev/null 2>&1 || missing+=("ethtool")
+    command -v awk >/dev/null 2>&1 || missing+=("awk")
+    
+    if [ ${#missing[@]} -gt 0 ]; then
+        warn "Missing dependencies: ${missing[*]}"
+        warn "Installing..."
+        if command -v pacman >/dev/null 2>&1; then
+            sudo pacman -S --noconfirm ${missing[*]} 2>/dev/null || true
+        elif command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get install -y ${missing[*]} 2>/dev/null || true
+        elif command -v dnf >/dev/null 2>&1; then
+            sudo dnf install -y ${missing[*]} 2>/dev/null || true
+        else
+            error "Cannot auto-install. Please install: ${missing[*]}"
+            exit 1
+        fi
+    fi
+}
 
 # --- Functions ---------------------------------------------------------------
 
@@ -253,15 +276,18 @@ install_udev_rule() {
     cat > "$UDEV_RULE_FILE" << 'EOF'
 # r8152-fix: Disable power saving and offloads for Realtek RTL8152/RTL8153
 # This prevents "Tx status -71" crashes that cause USB disconnection
+#
+# Matches both predictable naming (enp*, eno*, ens*) and legacy/mac naming (enx*)
 ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="2357", ATTR{idProduct}=="0601", ATTR{power/control}="on", ATTR{power/autosuspend_delay_ms}="0"
-ACTION=="add", SUBSYSTEM=="net", KERNEL=="enx*", ATTR{power/control}="on"
+ACTION=="add", SUBSYSTEM=="net", KERNEL=="enp*|enx*|eno*|ens*", ATTR{power/control}="on"
 EOF
     
     # Also add a systemd-triggering rule for the fix service
     # This is more portable and doesnt block udev
     cat > "/etc/udev/rules.d/99-r8152-trigger.rules" << 'EOF'
 # Trigger r8152-fix service when r8152 network interface appears
-ACTION=="add", SUBSYSTEM=="net", KERNEL=="enx*", TAG+="systemd", ENV{SYSTEMD_WANTS}="r8152-fix.service"
+# Matches both predictable naming (enp*, eno*, ens*) and legacy/mac naming (enx*)
+ACTION=="add", SUBSYSTEM=="net", KERNEL=="enp*|enx*|eno*|ens*", TAG+="systemd", ENV{SYSTEMD_WANTS}="r8152-fix.service"
 EOF
     
     udevadm control --reload-rules 2>/dev/null && log "  ✓ udev rules installed and reloaded" || warn "  Could not reload udev rules"
@@ -284,32 +310,8 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStartPre=/bin/sh -c 'for i in 1 2 3 4 5; do for d in /sys/class/net/enx*; do [ -d "$d" ] && ethtool -i "$(basename "$d")" 2>/dev/null | grep -q "driver: r8152" && exit 0; done; sleep 2; done'
-ExecStart=/bin/sh -c '\
-    for d in /sys/class/net/enx*; do \
-        [ -d "$d" ] || continue; \
-        iface=$(basename "$d"); \
-        driver=$(ethtool -i "$iface" 2>/dev/null | grep "driver:" | awk "{print \$2}"); \
-        [ "$driver" = "r8152" ] || continue; \
-        echo "Applying fixes to $iface..."; \
-        ethtool -K "$iface" tso off 2>/dev/null || true; \
-        ethtool -K "$iface" gso off 2>/dev/null || true; \
-        ethtool -K "$iface" gro off 2>/dev/null || true; \
-        ethtool -K "$iface" sg off 2>/dev/null || true; \
-        ethtool -K "$iface" rx-vlan-offload off 2>/dev/null || true; \
-        ethtool -K "$iface" tx-vlan-offload off 2>/dev/null || true; \
-        ethtool -K "$iface" rx-checksum off 2>/dev/null || true; \
-        ethtool -K "$iface" tx-checksum-ipv4 off 2>/dev/null || true; \
-        ethtool -K "$iface" tx-checksum-ipv6 off 2>/dev/null || true; \
-        ethtool --set-eee "$iface" eee off 2>/dev/null || true; \
-        bus=$(ethtool -i "$iface" 2>/dev/null | grep "bus-info:" | awk "{print \$2}"); \
-        usb_path="/sys/bus/usb/devices/*${bus#*-}"; \
-        for p in $usb_path; do \
-            [ -d "$p" ] || continue; \
-            echo on > "$p/power/control" 2>/dev/null || true; \
-            echo 0 > "$p/power/autosuspend_delay_ms" 2>/dev/null || true; \
-        done; \
-    done'
+ExecStartPre=/bin/sh -c 'for i in 1 2 3 4 5; do for d in /sys/class/net/enp* /sys/class/net/enx* /sys/class/net/eno* /sys/class/net/ens*; do [ -d "$d" ] && ethtool -i "$(basename "$d")" 2>/dev/null | grep -q "driver: r8152" && exit 0; done; sleep 2; done'
+ExecStart=/bin/bash -c 'for d in /sys/class/net/enp* /sys/class/net/enx* /sys/class/net/eno* /sys/class/net/ens*; do [ -d "$d" ] || continue; iface=$(basename "$d"); driver=$(ethtool -i "$iface" 2>/dev/null | grep "driver:" | awk "{print \$2}"); [ "$driver" = "r8152" ] || continue; echo "Applying fixes to $iface..."; ethtool -K "$iface" tso off gso off gro off sg off rx-vlan-offload off tx-vlan-offload off rx-checksum off tx-checksum-ipv4 off tx-checksum-ipv6 off 2>/dev/null || true; ethtool --set-eee "$iface" eee off 2>/dev/null || true; bus=$(ethtool -i "$iface" 2>/dev/null | grep "bus-info:" | awk "{print \$2}"); usb_part=$(echo "$bus" | sed "s/.*-//"); for p in /sys/bus/usb/devices/*"$usb_part"; do [ -d "$p" ] || continue; echo on > "$p/power/control" 2>/dev/null || true; echo 0 > "$p/power/autosuspend_delay_ms" 2>/dev/null || true; done; done'
 RemainAfterExit=yes
 
 [Install]
@@ -538,15 +540,50 @@ WATCHDOG
     log "  ✓ Watchdog script created at ${WATCHDOG_SCRIPT}"
 }
 
-# Install cron job
+# Install cron job (with systemd timer fallback for systems without cron)
 install_cron() {
-    log "Installing watchdog cron job..."
+    log "Installing watchdog scheduler..."
     
-    local cron_cmd="sudo ${CRON_CMD} > /dev/null 2>&1"
-    local cron_line="* * * * * ${cron_cmd}  # r8152-fix watchdog"
+    # Try cron first
+    if command -v crontab >/dev/null 2>&1; then
+        local cron_cmd="sudo ${CRON_CMD} > /dev/null 2>&1"
+        local cron_line="* * * * * ${cron_cmd}  # r8152-fix watchdog"
+        (crontab -u "${REAL_USER}" -l 2>/dev/null | grep -v "r8152-fix\|r8152-watchdog"; echo "$cron_line") | crontab -u "${REAL_USER}" - 2>/dev/null && log "  ✓ Cron job installed (every 1 minute)" && return 0
+    fi
     
-    # Remove any existing r8152-fix cron entries and add the new one
-    (crontab -u "${REAL_USER}" -l 2>/dev/null | grep -v "r8152-fix\|r8152-watchdog"; echo "$cron_line") | crontab -u "${REAL_USER}" - 2>/dev/null && log "  ✓ Cron job installed (every 1 minute)" || warn "  Could not install cron job"
+    # Fallback: systemd timer (for Arch/Omarchy and systems without cron)
+    if command -v systemctl >/dev/null 2>&1; then
+        log "  Cron not available, installing systemd timer..."
+        
+        cat > "/etc/systemd/system/r8152-watchdog.timer" << 'EOF'
+[Unit]
+Description=r8152-watchdog: Check for RTL8153 Tx errors every 2 minutes
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=120
+AccuracySec=10
+
+[Install]
+WantedBy=timers.target
+EOF
+        
+        cat > "/etc/systemd/system/r8152-watchdog.service" << EOF
+[Unit]
+Description=r8152-watchdog: Auto-recover from RTL8153 Tx errors
+
+[Service]
+Type=oneshot
+ExecStart=${CRON_CMD}
+EOF
+        
+        systemctl daemon-reload 2>/dev/null
+        systemctl enable r8152-watchdog.timer 2>/dev/null
+        systemctl start r8152-watchdog.timer 2>/dev/null && log "  ✓ Systemd timer installed (every 2 minutes)" || warn "  Could not start systemd timer"
+        return 0
+    fi
+    
+    warn " Neither cron nor systemd available. Watchdog will not run automatically."
 }
 
 # Remove all changes
@@ -554,18 +591,23 @@ remove_all() {
     log "Removing all r8152-fix changes..."
     
     # Remove cron job
-    crontab -u "${REAL_USER}" -l 2>/dev/null | grep -v "r8152-fix\|r8152-watchdog" | crontab -u "${REAL_USER}" - 2>/dev/null && log "  ✓ Cron job removed"
+    if command -v crontab >/dev/null 2>&1; then
+        crontab -u "${REAL_USER}" -l 2>/dev/null | grep -v "r8152-fix\|r8152-watchdog" | crontab -u "${REAL_USER}" - 2>/dev/null && log "  ✓ Cron job removed"
+    fi
     
     # Remove udev rules
     rm -f "$UDEV_RULE_FILE" "/etc/udev/rules.d/99-r8152-trigger.rules" 2>/dev/null
     udevadm control --reload-rules 2>/dev/null && log "  ✓ Udev rules removed"
     
-    # Remove systemd service
+    # Remove systemd service and timer
     if command -v systemctl >/dev/null 2>&1; then
         systemctl stop r8152-fix.service 2>/dev/null || true
         systemctl disable r8152-fix.service 2>/dev/null || true
         rm -f "$SERVICE_FILE" 2>/dev/null
-        systemctl daemon-reload 2>/dev/null && log "  ✓ Systemd service removed"
+        systemctl stop r8152-watchdog.timer 2>/dev/null || true
+        systemctl disable r8152-watchdog.timer 2>/dev/null || true
+        rm -f "/etc/systemd/system/r8152-watchdog.timer" "/etc/systemd/system/r8152-watchdog.service" 2>/dev/null
+        systemctl daemon-reload 2>/dev/null && log "  ✓ Systemd service/timer removed"
     fi
     
     # Remove watchdog script
@@ -600,7 +642,15 @@ show_status() {
     echo -n "  Udev rule: "; [ -f "$UDEV_RULE_FILE" ] && echo "✓" || echo "✗"
     echo -n "  Systemd service: "; [ -f "$SERVICE_FILE" ] && echo "✓" || echo "✗"
     echo -n "  Watchdog script: "; [ -f "$WATCHDOG_SCRIPT" ] && echo "✓" || echo "✗"
-    echo -n "  Cron job: "; crontab -u "${REAL_USER}" -l 2>/dev/null | grep -q "r8152-watchdog" && echo "✓" || echo "✗"
+    # Check for cron or systemd timer
+    local scheduler="none"
+    if command -v crontab >/dev/null 2>&1 && crontab -u "${REAL_USER}" -l 2>/dev/null | grep -q "r8152-watchdog"; then
+        scheduler="cron"
+    elif systemctl is-active r8152-watchdog.timer >/dev/null 2>&1; then
+        scheduler="systemd timer"
+    fi
+    echo -n "  Scheduler: ${scheduler}"
+    [ "$scheduler" = "none" ] && echo " ✗" || echo " ✓"
     
     echo ""
     echo "=== Watchdog Log (last 20 lines) ==="
@@ -612,6 +662,7 @@ show_status() {
 case "${1:-install}" in
     install|--install)
         log "=== Installing r8152-fix ==="
+        check_dependencies
         
         # Apply fixes to current interfaces
         NUM=$(detect_interfaces)
@@ -659,6 +710,7 @@ case "${1:-install}" in
         ;;
     
     apply|--apply)
+        check_dependencies
         NUM=$(detect_interfaces)
         if [ "$NUM" -eq 0 ]; then
             error "No r8152 interfaces detected."
