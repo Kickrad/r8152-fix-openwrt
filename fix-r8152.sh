@@ -22,9 +22,9 @@
 #   sudo bash fix-r8152.sh --remove     # Remove all fixes
 #   sudo bash fix-r8152.sh --watchdog   # Install only the watchdog
 #
-# Requirements: bash, ethtool, ping, awk
+# Requirements: bash, ethtool, ping, awk, hotplug
 # Works on: Any Linux distribution with kernel 3.x+
-# Tested on: Omarchy, Arch Linux, Ubuntu, Debian, Fedora, Raspberry Pi OS
+# Tested on: 
 #
 # License: MIT - https://opensource.org/licenses/MIT
 # =============================================================================
@@ -35,7 +35,12 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOG_FILE="/tmp/r8152-fix.log"
 WATCHDOG_SCRIPT="${SCRIPT_DIR}/r8152-watchdog.sh"
+
+#UDEV Doesn't work for openwrt, Switching to Hotplug (https://openwrt.org/docs/guide-user/base-system/hotplug)
 UDEV_RULE_FILE="/etc/udev/rules.d/99-r8152-fix.rules"
+
+#HOTPLUG_RULE_FILE=""
+
 SERVICE_FILE="/etc/systemd/system/r8152-fix.service"
 CRON_CMD="${SCRIPT_DIR}/r8152-watchdog.sh"
 VENDOR_ID="2357"        # TP-Link
